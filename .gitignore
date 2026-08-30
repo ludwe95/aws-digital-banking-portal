@@ -1,0 +1,18 @@
+# Environment-specific frontend configuration
+frontend/config.js
+
+# AWS and local credentials
+.aws/
+.env
+.env.*
+*.pem
+*.key
+
+# Editor, operating-system and temporary files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+*.zip
