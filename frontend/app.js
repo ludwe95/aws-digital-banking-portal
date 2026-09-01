@@ -1,173 +1,129 @@
-(() => {
-  "use strict";
+const config = window.APP_CONFIG;
+const list = document.querySelector('#transactions');
+const statusText = document.querySelector('#status');
+const userStatus = document.querySelector('#user-status');
+const portal = document.querySelector('#portal');
+const signInButton = document.querySelector('#sign-in');
+const signOutButton = document.querySelector('#sign-out');
 
-  const cfg = window.APP_CONFIG;
-  const elements = {
-    signIn: document.querySelector("#signIn"),
-    signOut: document.querySelector("#signOut"),
-    load: document.querySelector("#load"),
-    deposit: document.querySelector("#deposit"),
-    user: document.querySelector("#user"),
-    status: document.querySelector("#status"),
-    transactions: document.querySelector("#transactions")
-  };
+const base64Url = bytes => btoa(String.fromCharCode(...bytes))
+  .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const randomValue = () => base64Url(crypto.getRandomValues(new Uint8Array(32)));
 
-  function validateConfig() {
-    const required = ["apiUrl", "cognitoDomain", "clientId", "redirectUri", "scopes"];
-    for (const key of required) {
-      if (!cfg || !cfg[key]) throw new Error(`Missing configuration value: ${key}`);
-    }
-    if (cfg.apiUrl === "INVOKE_URL") throw new Error("Replace INVOKE_URL in config.js before deployment.");
-  }
+async function sha256(value) {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
+}
 
-  function base64Url(buffer) {
-    return btoa(String.fromCharCode(...new Uint8Array(buffer)))
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/g, "");
-  }
+function parseJwt(token) {
+  const value = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+  return JSON.parse(decodeURIComponent(atob(value).split('').map(c => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('')));
+}
 
-  function randomString() {
-    const bytes = new Uint8Array(64);
-    crypto.getRandomValues(bytes);
-    return base64Url(bytes);
-  }
+function tokens() {
+  const value = sessionStorage.getItem('tokens');
+  return value ? JSON.parse(value) : null;
+}
 
-  async function createChallenge(verifier) {
-    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-    return base64Url(hash);
-  }
+function sessionIsValid() {
+  const value = tokens();
+  if (!value?.access_token) return false;
+  return parseJwt(value.access_token).exp * 1000 > Date.now();
+}
 
-  function accessToken() {
-    return sessionStorage.getItem("access_token");
-  }
+function renderSession() {
+  const signedIn = sessionIsValid();
+  portal.hidden = !signedIn;
+  signInButton.hidden = signedIn;
+  signOutButton.hidden = !signedIn;
+  const value = tokens();
+  userStatus.textContent = signedIn ? `Signed in as ${parseJwt(value.id_token).email || 'demo user'}.` : 'You are signed out.';
+  if (!signedIn) sessionStorage.removeItem('tokens');
+}
 
-  function updateUi() {
-    const signedIn = Boolean(accessToken());
-    elements.signIn.hidden = signedIn;
-    elements.signOut.hidden = !signedIn;
-    elements.load.hidden = !signedIn;
-    elements.deposit.hidden = !signedIn;
-    elements.user.textContent = signedIn ? "Signed in to the lab." : "Not signed in.";
-    if (!signedIn) elements.transactions.innerHTML = "";
-  }
+async function signIn() {
+  const verifier = randomValue();
+  const challenge = base64Url(await sha256(verifier));
+  const state = randomValue();
+  sessionStorage.setItem('pkce_verifier', verifier);
+  sessionStorage.setItem('oauth_state', state);
+  const params = new URLSearchParams({
+    response_type: 'code', client_id: config.clientId,
+    redirect_uri: config.redirectUri, scope: 'openid email profile',
+    state, code_challenge: challenge, code_challenge_method: 'S256'
+  });
+  location.assign(`${config.cognitoDomain}/oauth2/authorize?${params}`);
+}
 
-  async function startLogin() {
-    const verifier = randomString();
-    sessionStorage.setItem("pkce_verifier", verifier);
-    const state = randomString();
-    sessionStorage.setItem("oauth_state", state);
-    const query = new URLSearchParams({
-      client_id: cfg.clientId,
-      response_type: "code",
-      scope: cfg.scopes,
-      redirect_uri: cfg.redirectUri,
-      state,
-      code_challenge_method: "S256",
-      code_challenge: await createChallenge(verifier)
+async function handleCallback() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('code');
+  if (!code) return;
+  if (params.get('state') !== sessionStorage.getItem('oauth_state')) throw new Error('Invalid sign-in state');
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code', client_id: config.clientId,
+    code, redirect_uri: config.redirectUri,
+    code_verifier: sessionStorage.getItem('pkce_verifier')
+  });
+  const response = await fetch(`${config.cognitoDomain}/oauth2/token`, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
+  });
+  if (!response.ok) throw new Error('Token exchange failed');
+  sessionStorage.setItem('tokens', JSON.stringify(await response.json()));
+  sessionStorage.removeItem('pkce_verifier');
+  sessionStorage.removeItem('oauth_state');
+  history.replaceState({}, document.title, config.redirectUri);
+}
+
+function signOut() {
+  sessionStorage.clear();
+  const params = new URLSearchParams({ client_id: config.clientId, logout_uri: config.logoutUri });
+  location.assign(`${config.cognitoDomain}/logout?${params}`);
+}
+
+async function apiFetch(path, options = {}) {
+  if (!sessionIsValid()) { renderSession(); throw new Error('Please sign in again'); }
+  const value = tokens();
+  const headers = { ...(options.headers || {}), Authorization: `Bearer ${value.access_token}` };
+  const response = await fetch(`${config.apiUrl}${path}`, { ...options, headers });
+  if (response.status === 401) { sessionStorage.removeItem('tokens'); renderSession(); }
+  return response;
+}
+
+async function loadTransactions() {
+  statusText.textContent = 'Loading...';
+  try {
+    const response = await apiFetch('/transactions');
+    if (!response.ok) throw new Error('Request failed');
+    const data = await response.json();
+    list.innerHTML = '';
+    data.transactions.forEach(item => {
+      const row = document.createElement('li');
+      row.textContent = `${item.type}: R${item.amount} - ${item.description || 'Demo'}`;
+      list.appendChild(row);
     });
-    window.location.assign(`${cfg.cognitoDomain}/oauth2/authorize?${query}`);
-  }
+    statusText.textContent = `${data.transactions.length} demo transaction(s) loaded.`;
+  } catch (error) { statusText.textContent = error.message; }
+}
 
-  async function finishLogin() {
-    const params = new URL(window.location.href).searchParams;
-    if (params.get("error")) throw new Error(params.get("error_description") || params.get("error"));
-    const code = params.get("code");
-    if (!code) return;
-    if (params.get("state") !== sessionStorage.getItem("oauth_state")) throw new Error("OAuth state validation failed.");
-    const verifier = sessionStorage.getItem("pkce_verifier");
-    if (!verifier) throw new Error("Missing PKCE verifier. Start sign-in again.");
-    const body = new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: cfg.clientId,
-      code,
-      redirect_uri: cfg.redirectUri,
-      code_verifier: verifier
+async function addDeposit() {
+  statusText.textContent = 'Adding demo deposit...';
+  try {
+    const response = await apiFetch('/transactions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'Deposit', amount: 100, description: 'Demo deposit' })
     });
-    const response = await fetch(`${cfg.cognitoDomain}/oauth2/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body
-    });
-    if (!response.ok) throw new Error(`Token exchange failed: ${response.status}`);
-    const tokens = await response.json();
-    sessionStorage.setItem("access_token", tokens.access_token);
-    if (tokens.id_token) sessionStorage.setItem("id_token", tokens.id_token);
-    if (tokens.refresh_token) sessionStorage.setItem("refresh_token", tokens.refresh_token);
-    sessionStorage.removeItem("pkce_verifier");
-    sessionStorage.removeItem("oauth_state");
-    window.history.replaceState({}, document.title, cfg.redirectUri);
-  }
+    if (!response.ok) throw new Error('Request failed');
+    await loadTransactions();
+  } catch (error) { statusText.textContent = error.message; }
+}
 
-  async function api(path, options = {}) {
-    const token = accessToken();
-    if (!token) throw new Error("Sign in before calling the API.");
-    const headers = { ...(options.headers || {}), Authorization: `Bearer ${token}` };
-    const response = await fetch(`${cfg.apiUrl}${path}`, { ...options, headers });
-    if (response.status === 401 || response.status === 403) {
-      sessionStorage.clear();
-      updateUi();
-      throw new Error("The session is invalid or expired. Sign in again.");
-    }
-    if (!response.ok) {
-      const message = await response.text();
-      throw new Error(`Request failed: ${response.status}${message ? ` - ${message}` : ""}`);
-    }
-    return response.json();
-  }
+signInButton.addEventListener('click', signIn);
+signOutButton.addEventListener('click', signOut);
+document.querySelector('#load').addEventListener('click', loadTransactions);
+document.querySelector('#deposit').addEventListener('click', addDeposit);
 
-  async function loadTransactions() {
-    elements.status.textContent = "Loading transactions...";
-    try {
-      const data = await api("/transactions");
-      elements.transactions.innerHTML = "";
-      const items = Array.isArray(data.transactions) ? data.transactions : [];
-      for (const item of items) {
-        const row = document.createElement("li");
-        row.textContent = `${item.type || "Transaction"}: R${item.amount ?? "0"} - ${item.description || "Demo"}`;
-        elements.transactions.appendChild(row);
-      }
-      elements.status.textContent = `${items.length} demo transaction(s) loaded.`;
-    } catch (error) {
-      elements.status.textContent = error.message;
-    }
-  }
-
-  async function addDeposit() {
-    elements.status.textContent = "Adding demo deposit...";
-    try {
-      await api("/transactions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "Deposit", amount: 100, description: "Demo deposit" })
-      });
-      await loadTransactions();
-    } catch (error) {
-      elements.status.textContent = error.message;
-    }
-  }
-
-  function signOut() {
-    sessionStorage.clear();
-    const query = new URLSearchParams({ client_id: cfg.clientId, logout_uri: cfg.redirectUri });
-    window.location.assign(`${cfg.cognitoDomain}/logout?${query}`);
-  }
-
-  async function init() {
-    try {
-      validateConfig();
-      elements.signIn.addEventListener("click", () => startLogin().catch(error => { elements.status.textContent = error.message; }));
-      elements.signOut.addEventListener("click", signOut);
-      elements.load.addEventListener("click", loadTransactions);
-      elements.deposit.addEventListener("click", addDeposit);
-      await finishLogin();
-    } catch (error) {
-      elements.status.textContent = error.message;
-    } finally {
-      updateUi();
-    }
-  }
-
-  document.addEventListener("DOMContentLoaded", init);
+(async () => {
+  try { await handleCallback(); }
+  catch (error) { userStatus.textContent = `Sign-in failed: ${error.message}`; }
+  renderSession();
 })();
-
