@@ -11,15 +11,21 @@
     <p class="eyebrow">AWS PORTFOLIO LAB</p>
     <h1>Digital Banking Portal</h1>
     <p class="note">Demo data only. Do not enter real banking information.</p>
-    <div class="actions">
-      <button id="load">View transactions</button>
-      <button id="deposit" class="secondary">Add demo deposit</button>
+    <div class="auth-bar">
+      <p id="user-status">You are signed out.</p>
+      <button id="sign-in">Sign in</button>
+      <button id="sign-out" class="danger" hidden>Sign out</button>
     </div>
-    <p id="status" role="status"></p>
-    <ul id="transactions"></ul>
+    <section id="portal" hidden>
+      <div class="actions">
+        <button id="load">View transactions</button>
+        <button id="deposit" class="secondary">Add demo deposit</button>
+      </div>
+      <p id="status" role="status"></p>
+      <ul id="transactions"></ul>
+    </section>
   </main>
   <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
-
